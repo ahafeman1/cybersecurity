@@ -2,3 +2,5 @@
 *.env
 .env
 keys.env
+vt_cache.json
+logs/
