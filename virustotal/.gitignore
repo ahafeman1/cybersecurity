@@ -1,1 +1,4 @@
+# Environment files
+*.env
 .env
+keys.env
