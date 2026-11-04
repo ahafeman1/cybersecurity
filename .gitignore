@@ -2,5 +2,13 @@
 *.env
 .env
 keys.env
+
+# Local data: may contain real indicators from investigations
 vt_cache.json
 logs/
+targets.txt
+
+# Python
+__pycache__/
+*.pyc
+.venv/

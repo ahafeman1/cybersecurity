@@ -1,0 +1,5 @@
+# One indicator per line: URL, domain, or IP. Lines starting with # are ignored.
+# Copy this file to targets.txt (which is gitignored) and add your own indicators.
+example.com
+http://example.com/login
+8.8.8.8
