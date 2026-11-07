@@ -53,7 +53,14 @@ Written to `virustotal/logs/`:
 
 ## Serverless version on AWS (`virustotal/aws/`)
 
-The same triage logic as an API: send an indicator, get back VirusTotal data plus an AI-written analyst verdict.
+The same triage logic as an API: send an indicator, get back VirusTotal data plus an AI-written analyst verdict. The whole stack is defined as infrastructure as code in an AWS SAM template and deploys with one command.
+
+```
+virustotal/aws/
+  template.yaml          # AWS SAM template: every resource, permission, and setting
+  src/lambda_function.py # Lambda code (standard library + boto3 only)
+  test_api.ps1           # PowerShell client for testing the deployed API
+```
 
 ```mermaid
 flowchart LR
@@ -66,12 +73,39 @@ flowchart LR
     L -.->|logs| W[CloudWatch Logs]
 ```
 
+### Deploy with AWS SAM
+
+Prerequisites: the AWS CLI configured for your account, the [AWS SAM CLI](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/install-sam-cli.html), and a Secrets Manager secret with `VT_API_KEY` (and optionally `ANTHROPIC_API_KEY`). The template references the secret; it never contains key values.
+
+```powershell
+cd virustotal/aws
+
+# ARN of your existing secret, needed for the SecretArn parameter
+aws secretsmanager describe-secret --secret-id vt-triage/api-key --query ARN --output text
+
+# First deploy: prompts for stack name, region, and parameters, then saves them to samconfig.toml (gitignored)
+sam deploy --guided
+
+# Later deploys
+sam deploy
+```
+
+No `sam build` step is needed because the function has no third-party dependencies. SAM shows a changeset of every resource it will add, modify, or delete before anything is applied.
+
+The stack outputs the invoke URL and the API key ID. Copy the key straight to the clipboard instead of printing it:
+
+```powershell
+aws apigateway get-api-key --api-key <ApiKeyId> --include-value --query value --output text | Set-Clipboard
+```
+
+Tear down everything except the secret with `sam delete`.
+
 ### Request and response
 
 ```powershell
-Invoke-RestMethod -Method Post -Uri $uri `
-  -Headers @{ "x-api-key" = $env:VT_TRIAGE_KEY } `
-  -ContentType "application/json" -Body '{"indicator":"spolaect.info"}'
+$env:VT_TRIAGE_URL = "<InvokeUrl from the stack outputs>"
+.\test_api.ps1                       # prompts for the API key with masked input
+.\test_api.ps1 -Indicator 8.8.8.8
 ```
 
 Returns the VirusTotal fields (detection stats, tags, domain age, registrar, report link), a `flagged` decision, and an `ai_verdict` object with `verdict`, `confidence`, `summary`, `recommended_action`, and which `provider` and `model` answered.
@@ -96,12 +130,12 @@ Example verdict for a domain with 12 malicious detections but mixed signals:
 |---|---|
 | API key required, plus a usage plan (1 req/s, burst 2, 100/day) | A public endpoint could otherwise drain the VirusTotal quota and Bedrock spend. Requests without a valid key get `403`. |
 | API keys (VirusTotal, Anthropic) stored in one Secrets Manager secret, cached across warm invocations | No secrets in code, environment variables, or the repo. |
-| Least-privilege IAM role | The function can write its own logs, read one secret, and invoke only the approved model families (Nova and Claude Haiku). |
+| Least-privilege IAM role, defined in the template | The function can write its own logs, read one secret, and invoke only the approved model families (Nova and Claude Haiku). Permissions are reviewable in code. |
 | Lookup-only | Indicators are never submitted to VirusTotal, so investigation data is not made public. |
 | Untrusted data wrapped in `<vt_data>` tags for the model | Page titles, tags, and categories can be attacker-controlled. The prompt tells the model to treat them strictly as data, guarding against prompt injection. |
 | Only needed fields sent to the model | Smaller prompts and nothing extra leaves the function. |
 | Minimal, useful logging | Logs record the indicator, verdict, and provider, plus the provider's short error reason on failure. Never keys, request headers, or full responses. |
-| TLS 1.2+ security policy on the API | Rejects outdated TLS versions. |
+| 30-day log retention | Logs don't accumulate forever; the default for Lambda log groups is to keep them indefinitely. |
 | Input validation | Rejects empty, oversized, or malformed requests with `400`. |
 
 ### Resilience
@@ -113,17 +147,19 @@ Example verdict for a domain with 12 malicious detections but mixed signals:
 
 ### Configuration
 
-| Setting | Value |
-|---|---|
-| Runtime | Python 3 (arm64), standard library + boto3 only |
-| Timeout | 45 seconds |
-| `SECRET_ID` | Secrets Manager secret holding `VT_API_KEY` and `ANTHROPIC_API_KEY` |
-| `MODEL_ID` | Bedrock inference profile ID, e.g. `us.amazon.nova-lite-v1:0`; unset skips Bedrock |
-| `ANTHROPIC_MODEL` | Anthropic API model ID, e.g. `claude-haiku-5-5`; unset skips the fallback |
+Set through template parameters at deploy time:
+
+| Parameter | Default | Purpose |
+|---|---|---|
+| `SecretArn` | (required) | Secrets Manager secret holding `VT_API_KEY` and `ANTHROPIC_API_KEY` |
+| `BedrockModelId` | `us.amazon.nova-lite-v1:0` | Bedrock inference profile tried first; empty skips Bedrock |
+| `AnthropicModel` | `claude-haiku-5-5` | Anthropic API model used as the fallback; empty skips it |
+| `DailyRequestQuota` | `100` | Requests per day allowed for the API key |
+
+Fixed in the template: Python 3.13 on arm64, 128 MB memory, 45-second timeout, API throttling of 1 request/second (burst 2).
 
 ## Roadmap
 
-- Infrastructure as code (AWS SAM or CDK) so the whole stack deploys with one command
 - DynamoDB cache for repeat lookups
 - Expose the triage function as an MCP tool so AI assistants can call it directly
 - Pull top requested domains from Cisco Secure Access for automated triage

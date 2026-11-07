@@ -1,0 +1,107 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  vt-triage: serverless IOC triage API. API Gateway (API key + usage plan) -> Lambda ->
+  VirusTotal lookup + AI verdict (Amazon Bedrock first, Anthropic API fallback).
+  Secrets live in an existing Secrets Manager secret that this stack only references.
+
+Parameters:
+  SecretArn:
+    Type: String
+    Description: ARN of the existing Secrets Manager secret holding VT_API_KEY and ANTHROPIC_API_KEY.
+    AllowedPattern: "arn:aws:secretsmanager:.+"
+  BedrockModelId:
+    Type: String
+    Default: us.amazon.nova-lite-v1:0
+    Description: Bedrock inference profile ID tried first. Leave empty to skip Bedrock.
+  AnthropicModel:
+    Type: String
+    Default: claude-haiku-5-5
+    Description: Anthropic API model used as the fallback. Leave empty to skip the fallback.
+  DailyRequestQuota:
+    Type: Number
+    Default: 100
+    Description: Maximum API requests per day for the API key.
+
+Globals:
+  Function:
+    Runtime: python3.13
+    Architectures: [arm64]
+    MemorySize: 128
+    Timeout: 45
+
+Resources:
+  # Created explicitly so logs have a retention period instead of being kept forever.
+  TriageLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/vt-triage-sam
+      RetentionInDays: 30
+
+  TriageFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: vt-triage-sam
+      Description: Triage one URL, domain, or IP with VirusTotal and an AI verdict.
+      CodeUri: src/
+      Handler: lambda_function.lambda_handler
+      LoggingConfig:
+        LogGroup: !Ref TriageLogGroup
+      Environment:
+        Variables:
+          SECRET_ID: !Ref SecretArn
+          MODEL_ID: !Ref BedrockModelId
+          ANTHROPIC_MODEL: !Ref AnthropicModel
+      # Least privilege: SAM adds permission to write this function's logs; these add exactly
+      # one secret and two model families. Nothing else.
+      Policies:
+        - Statement:
+            - Sid: ReadTriageSecret
+              Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !Ref SecretArn
+            - Sid: InvokeApprovedModels
+              Effect: Allow
+              Action: bedrock:InvokeModel
+              Resource:
+                - !Sub arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/us.amazon.nova-*
+                - arn:aws:bedrock:*::foundation-model/amazon.nova-*
+                - !Sub arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/us.anthropic.claude-haiku-*
+                - arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-*
+      Events:
+        Triage:
+          Type: Api
+          Properties:
+            RestApiId: !Ref TriageApi
+            Path: /triage
+            Method: post
+
+  TriageApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: vt-triage-sam-api
+      StageName: prod
+      EndpointConfiguration:
+        Type: REGIONAL
+      Auth:
+        ApiKeyRequired: true
+        UsagePlan:
+          CreateUsagePlan: PER_API
+          UsagePlanName: vt-triage-sam-usage-plan
+          Description: Caps request rate and daily volume so the endpoint cannot drain API quotas or spend.
+          Throttle:
+            RateLimit: 1
+            BurstLimit: 2
+          Quota:
+            Limit: !Ref DailyRequestQuota
+            Period: DAY
+
+Outputs:
+  InvokeUrl:
+    Description: Set $env:VT_TRIAGE_URL to this value to use test_api.ps1.
+    Value: !Sub https://${TriageApi}.execute-api.${AWS::Region}.amazonaws.com/prod/triage
+  ApiKeyId:
+    Description: ID of the generated API key. Get its value with the aws apigateway get-api-key command in the README.
+    Value: !Ref TriageApiApiKey
+  FunctionName:
+    Value: !Ref TriageFunction

@@ -12,3 +12,7 @@ targets.txt
 __pycache__/
 *.pyc
 .venv/
+
+# AWS SAM: build output and local deploy settings (samconfig holds account-specific ARNs)
+.aws-sam/
+samconfig.toml
