@@ -2,12 +2,15 @@
 # Usage:
 #   .\test_api.ps1                       # tests spolaect.info
 #   .\test_api.ps1 -Indicator 8.8.8.8
-# The API key is never stored in this file. It is read from $env:VT_TRIAGE_KEY,
-# or you are prompted for it. The prompt masks input and keeps the key out of PowerShell history.
+# Neither the endpoint nor the API key is stored in this file.
+#   $env:VT_TRIAGE_URL  the full invoke URL, e.g. https://<api-id>.execute-api.us-east-1.amazonaws.com/prod/triage
+#   $env:VT_TRIAGE_KEY  the API key (the prompt masks input and keeps it out of PowerShell history)
+# You are prompted for either one if it is not set.
 
 param([string]$Indicator = "spolaect.info")
 
-$uri = "https://cz4s0s2lvb.execute-api.us-east-1.amazonaws.com/prod/triage"
+if (-not $env:VT_TRIAGE_URL) { $env:VT_TRIAGE_URL = Read-Host "Paste invoke URL (ending in /prod/triage)" }
+$uri = $env:VT_TRIAGE_URL
 
 if (-not $env:VT_TRIAGE_KEY) {
     $secure = Read-Host "Paste API key" -AsSecureString
